@@ -1,157 +1,213 @@
 import streamlit as st
+import numpy as np
 import pandas as pd
-import random
-from faker import Faker
-from datetime import datetime
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.stats import zscore
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+import psutil
+import os
 
-# ------------------------------
-# Page Configuration & Instructions
-# ------------------------------
-st.set_page_config(page_title="OMOP ETL Simulator", layout="wide")
+# --- MONITORING UTILITY ---
+def display_performance_monitor():
+    """Tracks CPU and RAM usage of the current Streamlit process."""
+    process = psutil.Process(os.getpid())
+    mem_mb = process.memory_info().rss / (1024 * 1024)
+    cpu_percent = process.cpu_percent(interval=0.1)
+    
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("📊 System Health")
+    c1, c2 = st.sidebar.columns(2)
+    c1.metric("CPU Load", f"{cpu_percent}%")
+    c2.metric("Memory", f"{mem_mb:.1f} MB")
 
-st.title("Clinical Data Simulation: EHR to OMOP CDM")
+# --- APP CONFIG ---
+st.set_page_config(page_title="Multi-Institutional Data Sharing (NVFlare Sim)", layout="wide")
 
-with st.expander("How to use this app & Educational Context"):
+# --- SIDEBAR & SETUP ---
+st.sidebar.header("Scenario Controls")
+track_choice = st.sidebar.radio("Select Research Track:", ["Clinical (IC3 COVID-19)", "Basic Science (ImmPort)"])
+
+st.sidebar.info(
+    "**Microskill 6:** Navigate challenges in developing AI-ready datasets for "
+    "collaborative research (Federated Learning) while preserving privacy."
+)
+display_performance_monitor()
+
+# --- TITLE & CONTEXT ---
+st.title("🛡️ Navigating Multi-Institutional Data Sharing Challenges")
+st.markdown(f"### Current Track: **{track_choice}**")
+
+if track_choice == "Clinical (IC3 COVID-19)":
     st.markdown("""
-    ### Project Goal
-    This app demonstrates the **ETL (Extract, Transform, Load)** process of moving raw EHR data into the **OMOP Common Data Model (CDM)**.
-    
-    1. **Step 1: Raw Data Generation**: We use the `Faker` library to create synthetic patients.
-    2. **Step 2: Person Mapping**: We map source values (like 'Male') to standardized **Concept IDs** (like `8507`).
-    3. **Step 3: Condition Simulation**: We map ICD-10 codes to OMOP Standard Concepts for conditions.
-    
-    *Source: [OHDSI OMOP CDM Documentation](https://www.ohdsi.org/web/wiki/doku.php?id=documentation:cdm:person)*
+    * **Context:** Harmonizing patient data from multiple hospitals to predict COVID-19 severity without sharing PHI.
+    * **Dataset:** Simulating [IC3 UF Public COVID-19](https://ic3.center.ufl.edu/research/resources/datasets/)
+    * **Tool:** Simulating [NVIDIA FLARE](https://nvidia.github.io/NVFlare/) for Federated Learning.
+    """)
+else:
+    st.markdown("""
+    * **Context:** Aggregating immunology data from different labs to analyze cytokine responses without moving raw samples.
+    * **Dataset:** Simulating [ImmPort](https://www.immport.org/shared/home)
+    * **Tool:** Simulating [NVIDIA FLARE](https://nvidia.github.io/NVFlare/) for Federated Learning.
     """)
 
-# ------------------------------
-# Sidebar - Interactivity & Instructions
-# ------------------------------
-st.sidebar.header("Simulation Settings")
-st.sidebar.info("Adjust the parameters below to re-generate the synthetic cohort.")
+st.markdown("---")
 
-num_patients = st.sidebar.slider(
-    "Number of patients", 
-    min_value=5, 
-    max_value=100, 
-    value=10,
-    help="Determines how many unique patient rows are generated in the source data and person table."
-)
+# --- DATA GENERATION ---
+@st.cache_data
+def generate_data(track, n_samples=200):
+    np.random.seed(42)
+    
+    if track == "Clinical (IC3 COVID-19)":
+        # Simulating Patient Data
+        data = {
+            'Patient_ID': [f"PT-{i:03d}" for i in range(n_samples)],
+            'Institution': np.random.choice(['City_General', 'Mountain_View_Clinic'], n_samples),
+            'Age': np.random.randint(18, 90, n_samples),
+            # White Blood Cell Count (normal 4500-11000) with outliers
+            'WBC_Count': np.append(np.random.normal(7000, 2000, int(n_samples * 0.95)), 
+                                   [50000, 60000, 150, 200, 250000] * int(n_samples * 0.01)),
+            # C-Reactive Protein (inflammatory marker)
+            'CRP_Level': np.random.uniform(0.5, 20.0, n_samples),
+            # Oxygen Saturation with missing values
+            'O2_Saturation': [np.nan if i % 10 == 0 else x for i, x in enumerate(np.random.normal(96, 2, n_samples))]
+        }
+    else:
+        # Simulating Immunology Lab Data
+        data = {
+            'Sample_ID': [f"SMP-{i:03d}" for i in range(n_samples)],
+            'Institution': np.random.choice(['Lab_Alpha', 'Lab_Beta'], n_samples),
+            'Cell_Viability_%': np.random.normal(90, 5, n_samples),
+            # Cytokine IL-6 levels (pg/mL) with outliers
+            'Cytokine_IL6': np.append(np.random.gamma(2, 10, int(n_samples * 0.95)), 
+                                      [500, 600, 800, 1000, 1200] * int(n_samples * 0.01)),
+            # Antibody Titer
+            'Antibody_Titer': np.random.uniform(100, 5000, n_samples),
+            # Flow Cytometry Count with missing values
+            'T_Cell_Count': [np.nan if i % 10 == 0 else x for i, x in enumerate(np.random.normal(1200, 300, n_samples))]
+        }
+    
+    # Adjust lengths to match exactly if rounding caused issues (simple truncation)
+    min_len = min([len(v) for v in data.values()])
+    data = {k: v[:min_len] for k, v in data.items()}
+    
+    return pd.DataFrame(data)
 
-seed_value = st.sidebar.number_input(
-    "Random Seed", 
-    value=123,
-    help="Ensures reproducibility. Using 123 matches the original notebook's output."
-)
+# Generate and display raw data
+df_raw = generate_data(track_choice)
 
-# Initialize Faker with seed
-fake = Faker()
-Faker.seed(seed_value)
-random.seed(seed_value)
-
-# ------------------------------
-# Step 1: Generate Fake Patients
-# ------------------------------
-def generate_fake_patients(n):
-    races = ['White', 'Black', 'Asian', 'Other']
-    ethnicities = ['Not Hispanic or Latino', 'Hispanic or Latino']
-    data = []
-    for i in range(n):
-        gender = random.choice(['Male', 'Female'])
-        data.append({
-            "person_source_value": fake.unique.uuid4(),
-            "full_name": fake.name_male() if gender == 'Male' else fake.name_female(),
-            "gender": gender,
-            "birthdate": fake.date_of_birth(minimum_age=18, maximum_age=90),
-            "address": fake.address(),
-            "race": random.choice(races),
-            "ethnicity": random.choice(ethnicities)
-        })
-    df = pd.DataFrame(data)
-    df["birthdate"] = pd.to_datetime(df["birthdate"])
-    return df
-
-original_data = generate_fake_patients(num_patients)
-
-st.header("Step 1: Raw Source Data")
-st.markdown("This represents messy, non-standardized data exported from a hospital's local database.")
-st.dataframe(original_data, use_container_width=True)
-
-# ------------------------------
-# Step 2: Mapping & Person Table
-# ------------------------------
-def map_gender(gender):
-    return {'Male': 8507, 'Female': 8532}.get(gender, 0)
-
-def map_race(race):
-    return {'White': 8527, 'Black': 8516, 'Asian': 8515, 'Other': 8529}.get(race, 0)
-
-def map_ethnicity(ethnicity):
-    return {'Not Hispanic or Latino': 38070399, 'Hispanic or Latino': 38003563}.get(ethnicity, 0)
-
-def convert_to_omop_person(df):
-    return pd.DataFrame({
-        "person_id": range(1, len(df) + 1),
-        "gender_concept_id": df["gender"].map(map_gender),
-        "year_of_birth": df["birthdate"].dt.year,
-        "month_of_birth": df["birthdate"].dt.month,
-        "day_of_birth": df["birthdate"].dt.day,
-        "birth_datetime": df["birthdate"],
-        "race_concept_id": df["race"].map(map_race),
-        "ethnicity_concept_id": df["ethnicity"].map(map_ethnicity),
-        "person_source_value": df["person_source_value"],
-        "gender_source_value": df["gender"],
-        "race_source_value": df["race"],
-        "ethnicity_source_value": df["ethnicity"]
-    })
-
-omop_person = convert_to_omop_person(original_data)
-
-st.header("Step 2: Standardized OMOP Person Table")
-st.markdown("Notice how names and addresses are removed, and demographics are replaced with **Concept IDs**.")
-
-# Interactive Tooltip simulation for columns
-st.info("**Pro-tip:** Hover over the table to see data, or check the 'Concept Map' below.")
-st.dataframe(omop_person, use_container_width=True)
-
-# ------------------------------
-# Step 3: Condition Occurrence
-# ------------------------------
-st.header("Step 3: Condition Occurrence")
-st.markdown("We simulate diagnoses by mapping ICD-10 source codes to OMOP Standard Concepts.")
-
-icd_to_omop = {"E11.9": 201826, "I10": 320128, "J45.909": 317009, "F32.9": 440383}
-
-def generate_full_condition_occurrence(person_df):
-    conditions = []
-    icd_codes = list(icd_to_omop.keys())
-    for i, person in person_df.iterrows():
-        for _ in range(random.randint(1, 3)):
-            icd = random.choice(icd_codes)
-            start_date = fake.date_between(start_date='-5y', end_date='-6m')
-            conditions.append({
-                "condition_occurrence_id": len(conditions) + 1,
-                "person_id": person['person_id'],
-                "condition_concept_id": icd_to_omop[icd],
-                "condition_start_date": start_date,
-                "condition_type_concept_id": 32020, # EHR Problem List
-                "condition_source_value": icd
-            })
-    return pd.DataFrame(conditions)
-
-condition_occurrence = generate_full_condition_occurrence(omop_person)
-st.dataframe(condition_occurrence, use_container_width=True)
-
-# ------------------------------
-# Discussion Section (From Notebook)
-# ------------------------------
-st.divider()
-st.header("Knowledge Check")
-col1, col2 = st.columns(2)
-
+col1, col2 = st.columns([1, 2])
 with col1:
-    st.markdown("### Why use Concept IDs?")
-    st.write("Concept IDs allow researchers to run the same query across different hospitals, even if one uses ICD-10 and another uses SNOMED.")
+    st.subheader("1. Raw Local Data")
+    st.dataframe(df_raw.head(10), use_container_width=True)
+    st.caption("Raw data containing outliers, missing values, and institutional identifiers.")
 
 with col2:
-    st.markdown("### ETL Challenges")
-    st.write("In the real world, source data is often 'messy' (e.g., misspelled genders or missing birthdates), requiring significant cleaning before mapping.")
+    st.subheader("Data Distribution Visualization")
+    target_col = 'WBC_Count' if track_choice == "Clinical (IC3 COVID-19)" else 'Cytokine_IL6'
+    
+    fig, ax = plt.subplots(figsize=(8, 3))
+    sns.boxplot(x=df_raw[target_col], color='salmon', ax=ax)
+    ax.set_title(f"Distribution of {target_col} (Notice Outliers)")
+    st.pyplot(fig)
+
+# --- STEP 2: OUTLIER DETECTION (Z-SCORE) ---
+st.markdown("### 2. Outlier Detection & Removal")
+st.write("Outliers can skew Federated Learning models. We use Z-Score > 3 to identify measurement errors.")
+
+target_col = 'WBC_Count' if track_choice == "Clinical (IC3 COVID-19)" else 'Cytokine_IL6'
+
+# Calculate Z-scores
+df_clean = df_raw.copy()
+df_clean['z_score'] = zscore(df_clean[target_col])
+outliers = df_clean[np.abs(df_clean['z_score']) > 3]
+
+c1, c2 = st.columns(2)
+with c1:
+    st.metric("Total Rows", len(df_raw))
+with c2:
+    st.metric("Outliers Detected (Z > 3)", len(outliers))
+
+if st.button("Remove Outliers"):
+    df_clean = df_clean[np.abs(df_clean['z_score']) <= 3].drop(columns=['z_score'])
+    st.success(f"Removed {len(outliers)} outliers. Dataset is cleaner.")
+else:
+    st.warning("Click button above to clean data before proceeding.")
+    df_clean = df_raw.copy() # Keep raw if not clicked
+
+# --- STEP 3: PREPROCESSING (IMPUTATION & SCALING) ---
+st.markdown("### 3. Preprocessing (Imputation & Scaling)")
+
+missing_col = 'O2_Saturation' if track_choice == "Clinical (IC3 COVID-19)" else 'T_Cell_Count'
+
+# Imputation Strategy
+impute_method = st.selectbox("Choose Imputation Method for Missing Data:", ["Mean", "Median", "Zero"])
+
+if impute_method == "Mean":
+    val = df_clean[missing_col].mean()
+elif impute_method == "Median":
+    val = df_clean[missing_col].median()
+else:
+    val = 0
+
+df_clean[missing_col] = df_clean[missing_col].fillna(val)
+
+# Standardization (Scaling)
+scaler = MinMaxScaler()
+num_cols = df_clean.select_dtypes(include=[np.number]).columns
+df_normalized = df_clean.copy()
+df_normalized[num_cols] = scaler.fit_transform(df_clean[num_cols])
+
+st.dataframe(df_normalized.head(), use_container_width=True)
+st.caption(f"Data Imputed ({impute_method}) and Min-Max Scaled (0-1). Ready for AI Model.")
+
+# --- STEP 4: FEDERATED LEARNING SIMULATION ---
+st.markdown("---")
+st.subheader("4. Federated Learning Simulation (NVIDIA FLARE Concept)")
+st.info("Instead of centralizing the data (unsafe), we split data by Institution and compute 'Local Updates'. We then average the updates to create a Global Model.")
+
+# Split Data
+inst_names = df_normalized['Institution'].unique()
+inst_A_data = df_normalized[df_normalized['Institution'] == inst_names[0]]
+inst_B_data = df_normalized[df_normalized['Institution'] == inst_names[1]]
+
+# Simulate "Training" (Calculating average feature weights as a proxy for model weights)
+# In real ML, this would be gradients or neural network weights
+features = [c for c in num_cols if c != 'z_score']
+
+weights_A = inst_A_data[features].mean()
+weights_B = inst_B_data[features].mean()
+
+# Federated Aggregation
+global_weights = (weights_A + weights_B) / 2
+
+# Visualization of the FL Process
+col_a, col_b, col_c = st.columns(3)
+
+with col_a:
+    st.markdown(f"#### 🏥 {inst_names[0]}")
+    st.write("**Local Model Weights:**")
+    st.dataframe(weights_A, use_container_width=True)
+    st.caption("Computed locally. Raw data stays here.")
+
+with col_b:
+    st.markdown(f"#### 🏥 {inst_names[1]}")
+    st.write("**Local Model Weights:**")
+    st.dataframe(weights_B, use_container_width=True)
+    st.caption("Computed locally. Raw data stays here.")
+
+with col_c:
+    st.markdown("#### 🌐 Global Model")
+    st.write("**Aggregated Weights:**")
+    st.dataframe(global_weights, use_container_width=True)
+    st.success("✅ Improved model derived without sharing patient rows!")
+
+# --- CONCLUSION ---
+st.markdown("---")
+st.markdown("""
+**Key Takeaways:**
+1.  **Local Cleaning:** Each institution must handle outliers (Z-score) and missing values locally before training.
+2.  **Standardization:** Data must be on the same scale (MinMax) across institutions for the Global Model to make sense.
+3.  **Privacy:** By sharing *weights* (middle column) instead of *rows* (top dataframe), we respect privacy and DUA agreements.
+""")
